@@ -195,3 +195,7 @@ slurm_logs/
 
 .cometml-runs/**
 .DS_Store
+
+configs/cometml_secret.yaml
+
+sbatch_logs_*/
