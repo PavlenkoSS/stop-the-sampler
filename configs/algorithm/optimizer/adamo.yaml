@@ -3,3 +3,4 @@
 name: adamo
 lam: 1e-3  # isometry strength (the paper's default)
 iso_lr: null  # rate of the isometry step; null = each group's step size, with its schedule
+scope: all  # all = every kernel, as in the paper | hidden = output layers on plain Adam

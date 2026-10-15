@@ -20,6 +20,7 @@ from algorithms.common.adamo import (
     iso_grads,
     iso_penalty,
     linear_maps,
+    output_kernels,
     r_iso,
 )
 from algorithms.common.diffusion_related.init_model import (
@@ -271,6 +272,7 @@ def test_the_config_group_selects_adamo(algorithm):
                 "algorithm/optimizer=adamo",
                 "algorithm.optimizer.lam=1e-2",
                 "algorithm.model.hidden_init=orthogonal",
+                "algorithm.optimizer.scope=hidden",
             ],
         )
     assert default.algorithm.optimizer.name == "adam"
@@ -279,6 +281,12 @@ def test_the_config_group_selects_adamo(algorithm):
     assert chosen.algorithm.optimizer.lam == pytest.approx(1e-2)
     assert chosen.algorithm.optimizer.iso_lr is None
     assert chosen.algorithm.model.hidden_init == "orthogonal"
+    assert chosen.algorithm.optimizer.scope == "hidden"
+    with hydra.initialize_config_dir(config_dir=CONFIG_DIR, version_base=None):
+        adamo_default = hydra.compose(
+            "base_conf", overrides=[f"algorithm={algorithm}", "algorithm/optimizer=adamo"]
+        )
+    assert adamo_default.algorithm.optimizer.scope == "all"
 
 
 # --------------------------------------------------------------------------- #
@@ -314,18 +322,12 @@ def _kernels(params):
     }
 
 
-def _is_head(w):
-    """Every output layer here is initialised to a constant (1e-8, weight_init
-    or zero); every hidden kernel is a random draw."""
-    return bool(jnp.all(w == w.ravel()[0]))
-
-
 @pytest.mark.parametrize("build", list(BUILDS))
 def test_orthogonal_init_makes_every_hidden_kernel_isometric(build):
     params = _params(build, "orthogonal")
-    kernels = _kernels(params)
-    heads = [w for w in kernels.values() if _is_head(w)]
-    hidden = {p: w for p, w in kernels.items() if not _is_head(w)}
+    kernels, out = _kernels(params), output_kernels(params)
+    heads = [w for p, w in kernels.items() if p in out]
+    hidden = {p: w for p, w in kernels.items() if p not in out}
     assert heads and hidden
     for path, w in hidden.items():
         assert float(r_iso(w)) == pytest.approx(0.0, abs=1e-4), path
@@ -341,10 +343,11 @@ def test_orthogonal_init_redraws_the_hidden_kernels_and_nothing_else(build):
     their near-zero init, so the sampler still starts from the reference process."""
     lecun, ortho = _params(build, "lecun_normal"), _params(build, "orthogonal")
     assert jax.tree.structure(lecun) == jax.tree.structure(ortho)
+    out = output_kernels(lecun)
     flat, _ = jax.tree_util.tree_flatten_with_path(lecun)
     for (path, a), b in zip(flat, jax.tree.leaves(ortho)):
         key = jax.tree_util.keystr(path)
-        if key.endswith("['kernel']") and not _is_head(a):
+        if key.endswith("['kernel']") and key not in out:
             assert not np.array_equal(np.asarray(a), np.asarray(b)), key
         else:
             assert np.array_equal(np.asarray(a), np.asarray(b)), key
@@ -359,3 +362,58 @@ def test_lecun_normal_is_the_default():
 def test_an_unknown_hidden_init_is_an_error():
     with pytest.raises(ValueError, match="hidden_init"):
         _params("non_acyclic_net", "xavier")
+
+
+# --------------------------------------------------------------------------- #
+# scope: which kernels the isometry force covers
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("hidden_init", ["lecun_normal", "orthogonal"])
+@pytest.mark.parametrize("build", list(BUILDS))
+def test_output_kernels_finds_exactly_the_output_layers(build, hidden_init):
+    """Cross-checked against a second rule that holds at these sizes: every hidden
+    layer is num_hid = 16 wide, and no output layer is."""
+    params = _params(build, hidden_init)
+    kernels = _kernels(params)
+    expected = {p for p, w in kernels.items() if w.shape[-1] != MODEL["num_hid"]}
+    assert expected
+    assert output_kernels(params) == expected
+
+
+def _iso_updates(scope, lam=1e-2):
+    """The update each leaf gets from a zero task gradient: the isometry step alone."""
+    cfg = _alg_cfg({"name": "adamo", "lam": lam, "iso_lr": None, "scope": scope})
+    state = init_model_non_acyclic(jax.random.PRNGKey(0), 2, cfg)
+    zero = jax.tree_util.tree_map(jnp.zeros_like, state.params)
+    updates, _ = state.tx.update(zero, state.opt_state, state.params)
+    flat, _ = jax.tree_util.tree_flatten_with_path(updates)
+    upd = {jax.tree_util.keystr(p): np.asarray(u) for p, u in flat}
+    r = {
+        jax.tree_util.keystr(p): np.asarray(g)
+        for p, g in jax.tree_util.tree_flatten_with_path(iso_grads(state.params))[0]
+    }
+    lr = {k: cfg.bwd_step_size if "bwd_state_net" in k else cfg.step_size for k in upd}
+    return upd, r, lr, output_kernels(state.params), lam
+
+
+def test_scope_hidden_leaves_the_output_layers_to_plain_adam():
+    upd, r, lr, heads, lam = _iso_updates("hidden")
+    assert heads
+    for key, u in upd.items():
+        if key in heads or not key.endswith("['kernel']"):
+            assert np.array_equal(u, np.zeros_like(u)), key
+        else:
+            assert np.allclose(u, -lr[key] * lam * r[key], rtol=1e-4, atol=1e-10), key
+            assert np.abs(u).max() > 0, key
+
+
+def test_scope_all_covers_the_output_layers_too():
+    """The paper's: the sum over layers includes the output layer."""
+    upd, r, lr, heads, lam = _iso_updates("all")
+    for key in heads:
+        assert np.abs(upd[key]).max() > 0, key
+        assert np.allclose(upd[key], -lr[key] * lam * r[key], rtol=1e-4, atol=0), key
+
+
+def test_an_unknown_scope_is_an_error():
+    with pytest.raises(ValueError, match="scope"):
+        _iso_updates("heads")

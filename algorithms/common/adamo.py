@@ -33,12 +33,17 @@ Differences from the original, both forced by this repository:
   here builds its rates through ``lr_schedule``.  With constant rates the chain is
   the original's term for term.
 """
-from typing import NamedTuple, Optional
+from typing import FrozenSet, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
 import optax
 from jax import Array
+
+#: which kernels the isometry force covers.  ``all`` is the paper's: the sum in
+#: its objective runs over every layer, the output layer included.  ``hidden``
+#: leaves the output layers to plain Adam, so they set their own output scale.
+SCOPES = ("all", "hidden")
 
 
 # --------------------------------------------------------------------------- #
@@ -55,16 +60,44 @@ def is_kernel_path(path) -> bool:
     return bool(path) and getattr(path[-1], "key", None) == "kernel"
 
 
-def linear_maps(params):
+def linear_maps(params, exclude: FrozenSet[str] = frozenset()):
     """A bool pytree over ``params``: which leaves are linear maps.
 
     Rank 2 or more *and* named ``kernel``.  Biases, ``logZ``, ``betas`` and the
     ``(1, num_hid)`` time/level phases are not.  Leaves that ``optax.masked`` has
-    replaced by ``MaskedNode`` carry no arrays and are skipped by the flattening.
+    replaced by ``MaskedNode`` carry no arrays and are skipped by the flattening,
+    and keep their keys, so a path means the same thing in a parameter group as in
+    the whole tree.  ``exclude`` holds paths (``jax.tree_util.keystr``) to leave
+    out -- the output layers under ``scope: hidden``.
     """
     leaves, treedef = jax.tree_util.tree_flatten_with_path(params)
     return jax.tree_util.tree_unflatten(
-        treedef, [jnp.ndim(v) >= 2 and is_kernel_path(path) for path, v in leaves]
+        treedef,
+        [
+            jnp.ndim(v) >= 2
+            and is_kernel_path(path)
+            and jax.tree_util.keystr(path) not in exclude
+            for path, v in leaves
+        ],
+    )
+
+
+def output_kernels(params) -> FrozenSet[str]:
+    """Paths of the output layers' kernels, read off *freshly initialised* params.
+
+    Every output layer of the samplers' networks is initialised to a constant --
+    ``constant(1e-8)``, ``constant(weight_init)`` or zero, so that the sampler
+    starts from the reference process -- and every hidden kernel is a random draw.
+    So at init, a kernel whose entries are all equal is a head.  Renaming the
+    layers instead would rename the parameters of every saved model.
+    """
+    leaves, _ = jax.tree_util.tree_flatten_with_path(params)
+    return frozenset(
+        jax.tree_util.keystr(path)
+        for path, w in leaves
+        if jnp.ndim(w) >= 2
+        and is_kernel_path(path)
+        and bool(jnp.all(w == w.ravel()[0]))
     )
 
 
@@ -112,12 +145,13 @@ def iso_penalty(params) -> Array:
     return sum(r_iso(w) for w in leaves)
 
 
-def iso_grads(params):
-    """``r_t`` as a pytree matching ``params``; zero for anything not a linear map."""
+def iso_grads(params, exclude: FrozenSet[str] = frozenset()):
+    """``r_t`` as a pytree matching ``params``; zero for anything not a linear map
+    and for the paths in ``exclude``."""
     return jax.tree_util.tree_map(
         lambda w, k: grad_r_iso(w) if k else jnp.zeros_like(w),
         params,
-        linear_maps(params),
+        linear_maps(params, exclude),
     )
 
 
@@ -129,7 +163,7 @@ class AddIsoState(NamedTuple):
 
 
 def add_iso_gradient(
-    iso_lr: optax.ScalarOrSchedule, lam: float
+    iso_lr: optax.ScalarOrSchedule, lam: float, exclude: FrozenSet[str] = frozenset()
 ) -> optax.GradientTransformation:
     """Subtract ``eta_iso * lam * r_t``, outside the adaptive scaling.
 
@@ -146,7 +180,7 @@ def add_iso_gradient(
         if params is None:
             raise ValueError("add_iso_gradient needs params; pass them to opt.update")
         step = iso_lr(state.count) if callable(iso_lr) else iso_lr
-        r = iso_grads(params)
+        r = iso_grads(params, exclude)
         updates = jax.tree_util.tree_map(
             lambda u, ri: u - step * lam * ri, updates, r
         )
@@ -162,16 +196,18 @@ def adamo(
     b1: float = 0.9,
     b2: float = 0.999,
     eps: float = 1e-8,
+    exclude: FrozenSet[str] = frozenset(),
 ) -> optax.GradientTransformation:
     """Adam on the task gradient, plus a decoupled isometry step.
 
     ``lam = 1e-3`` and ``iso_lr = learning_rate`` are the paper's defaults.
     ``lam = 0`` recovers ``optax.adam`` exactly.  On a parameter group with no
-    kernel (``logZ``, ``betas``) the isometry term is zero and this is Adam.
+    kernel (``logZ``, ``betas``) the isometry term is zero and this is Adam, and
+    so it is on the kernels in ``exclude``.
     """
     iso_lr = learning_rate if iso_lr is None else iso_lr
     return optax.chain(
         optax.scale_by_adam(b1=b1, b2=b2, eps=eps),
         optax.scale_by_learning_rate(learning_rate),
-        add_iso_gradient(iso_lr, lam),
+        add_iso_gradient(iso_lr, lam, frozenset(exclude)),
     )
