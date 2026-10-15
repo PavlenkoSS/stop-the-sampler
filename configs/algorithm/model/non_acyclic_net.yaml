@@ -7,6 +7,7 @@ inner_clip: 1e2
 
 weight_init: 1e-8
 bias_init: 0.1
+hidden_init: lecun_normal  # hidden Dense kernels: lecun_normal | orthogonal
 
 gamma: ${target.gfn_non_acyclic.gamma}
 learn_fwd_corrections: True

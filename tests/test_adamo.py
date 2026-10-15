@@ -2,8 +2,8 @@
 
 The R_iso checks are the ones ``plasticity.optim.adamo`` is held to in
 PavlenkoSS/plasticity-umap-reset; the rest check what the port adds here: Flax
-kernels, the parameter groups of ``optax.multi_transform``, scheduled rates, and
-the Hydra config group.
+kernels, the parameter groups of ``optax.multi_transform``, scheduled rates, the
+Hydra config group, and the orthogonal init the paper starts AdamO from.
 """
 import os
 
@@ -25,6 +25,8 @@ from algorithms.common.adamo import (
 from algorithms.common.diffusion_related.init_model import (
     init_model,
     init_model_non_acyclic,
+    init_model_non_acyclic_ml,
+    init_model_pisgrad_net_clf,
 )
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs")
@@ -268,9 +270,92 @@ def test_the_config_group_selects_adamo(algorithm):
                 f"algorithm={algorithm}",
                 "algorithm/optimizer=adamo",
                 "algorithm.optimizer.lam=1e-2",
+                "algorithm.model.hidden_init=orthogonal",
             ],
         )
     assert default.algorithm.optimizer.name == "adam"
+    assert default.algorithm.model.hidden_init == "lecun_normal"
     assert chosen.algorithm.optimizer.name == "adamo"
     assert chosen.algorithm.optimizer.lam == pytest.approx(1e-2)
     assert chosen.algorithm.optimizer.iso_lr is None
+    assert chosen.algorithm.model.hidden_init == "orthogonal"
+
+
+# --------------------------------------------------------------------------- #
+# orthogonal init of the hidden layers
+# --------------------------------------------------------------------------- #
+MODEL = {"dim": 2, "num_layers": 3, "num_hid": 16}
+BUILDS = {
+    "pisgrad_net": (init_model, {"name": "pis"}),
+    "non_acyclic_net": (init_model_non_acyclic, {}),
+    "non_acyclic_net_shared": (
+        init_model_non_acyclic,
+        {"model": {**MODEL, "shared_model": True}},
+    ),
+    "non_acyclic_net_ml": (init_model_non_acyclic_ml, {"num_levels": 2}),
+    "pisgrad_net_clf": (init_model_pisgrad_net_clf, {}),
+}
+
+
+def _params(build, hidden_init=None):
+    init_fn, overrides = BUILDS[build]
+    cfg = _alg_cfg(ADAMO, **overrides)
+    if hidden_init is not None:
+        cfg.model.hidden_init = hidden_init
+    return init_fn(jax.random.PRNGKey(0), 2, cfg).params
+
+
+def _kernels(params):
+    flat, _ = jax.tree_util.tree_flatten_with_path(params)
+    return {
+        jax.tree_util.keystr(p): w
+        for p, w in flat
+        if jax.tree_util.keystr(p).endswith("['kernel']")
+    }
+
+
+def _is_head(w):
+    """Every output layer here is initialised to a constant (1e-8, weight_init
+    or zero); every hidden kernel is a random draw."""
+    return bool(jnp.all(w == w.ravel()[0]))
+
+
+@pytest.mark.parametrize("build", list(BUILDS))
+def test_orthogonal_init_makes_every_hidden_kernel_isometric(build):
+    params = _params(build, "orthogonal")
+    kernels = _kernels(params)
+    heads = [w for w in kernels.values() if _is_head(w)]
+    hidden = {p: w for p, w in kernels.items() if not _is_head(w)}
+    assert heads and hidden
+    for path, w in hidden.items():
+        assert float(r_iso(w)) == pytest.approx(0.0, abs=1e-4), path
+    # so all that is left of R_iso at init is the near-zero heads
+    assert float(iso_penalty(params)) == pytest.approx(
+        float(sum(r_iso(w) for w in heads)), rel=1e-5
+    )
+
+
+@pytest.mark.parametrize("build", list(BUILDS))
+def test_orthogonal_init_redraws_the_hidden_kernels_and_nothing_else(build):
+    """Same tree, same heads, biases, phases and logZ: the output layers keep
+    their near-zero init, so the sampler still starts from the reference process."""
+    lecun, ortho = _params(build, "lecun_normal"), _params(build, "orthogonal")
+    assert jax.tree.structure(lecun) == jax.tree.structure(ortho)
+    flat, _ = jax.tree_util.tree_flatten_with_path(lecun)
+    for (path, a), b in zip(flat, jax.tree.leaves(ortho)):
+        key = jax.tree_util.keystr(path)
+        if key.endswith("['kernel']") and not _is_head(a):
+            assert not np.array_equal(np.asarray(a), np.asarray(b)), key
+        else:
+            assert np.array_equal(np.asarray(a), np.asarray(b)), key
+
+
+def test_lecun_normal_is_the_default():
+    implicit, explicit = _params("non_acyclic_net"), _params("non_acyclic_net", "lecun_normal")
+    for a, b in zip(jax.tree.leaves(implicit), jax.tree.leaves(explicit)):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_an_unknown_hidden_init_is_an_error():
+    with pytest.raises(ValueError, match="hidden_init"):
+        _params("non_acyclic_net", "xavier")
