@@ -11,6 +11,7 @@ max_diffusion: 10.
 
 defaults:
   - model: pisgrad_net
+  - optimizer: adam
   - noise_schedule: cosine
 
 model:

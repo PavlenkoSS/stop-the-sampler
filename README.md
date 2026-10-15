@@ -46,3 +46,18 @@ python run.py algorithm=<algorithm_name> target=<target_name>
 - `funnel`
 - `many_well`
 - `nice_digits`
+
+### Optimizer
+
+Every parameter group is trained with Adam by default. AdamO -- Adam plus a decoupled isometry regularizer ([Rosseau, Müller & Nowé](https://arxiv.org/abs/2606.09762), ported from `plasticity-umap-reset`) -- is selected with the `optimizer` config group:
+```bash
+python run.py algorithm=gfn_non_acyclic target=funnel algorithm/optimizer=adamo algorithm.optimizer.lam=1e-3
+```
+It adds `-iso_lr * lam * grad R_iso(W)` outside Adam's adaptive scaling, where `R_iso(W) = sum_i (sigma_i(W)^2 - 1)^2` over every `kernel` of the networks; biases, `logZ` and the time phases get plain Adam. `iso_lr: null` means each group's own step size, with its schedule. `scope: all` (the paper's) covers every kernel, output layers included; `algorithm.optimizer.scope=hidden` leaves the output layers -- the kernels the networks initialise to a constant -- to plain Adam. The summed `R_iso` is logged to Comet as `iso_penalty` for every optimizer.
+
+The paper starts AdamO from an orthogonal init. `algorithm.model.hidden_init=orthogonal` draws every hidden `Dense` kernel semi-orthogonal (gain 1), so `R_iso` of the hidden layers is zero at init; the default `lecun_normal` is Flax's default and draws exactly what earlier runs did. The output layers keep their near-zero init under either law, so the sampler still starts from the reference process:
+```bash
+python run.py algorithm=gfn_non_acyclic target=funnel algorithm/optimizer=adamo algorithm.model.hidden_init=orthogonal
+```
+
+Tests: `python -m pytest tests`

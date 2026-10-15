@@ -1,5 +1,9 @@
+from functools import partial
+
 import jax.numpy as jnp
 from flax import linen as nn
+
+from algorithms.common.models.initializers import hidden_kernel_init
 
 
 class TimeEncoder(nn.Module):
@@ -106,6 +110,7 @@ class PISGRADNetClf(nn.Module):
 
     weight_init: float = 1e-8
     bias_init: float = 0.1
+    hidden_init: str = "lecun_normal"  # lecun_normal | orthogonal
 
     use_lp: bool = True
     base_var: float = 1.0
@@ -117,21 +122,22 @@ class PISGRADNetClf(nn.Module):
     bwd_scale_scalar: float = 0.9
 
     def setup(self):
+        dense = partial(nn.Dense, kernel_init=hidden_kernel_init(self.hidden_init))
         self.timestep_phase = self.param(
             "timestep_phase", nn.initializers.zeros_init(), (1, self.num_hid)
         )
         self.timestep_coeff = jnp.linspace(start=0.1, stop=100, num=self.num_hid)[None]
 
         self.time_coder_state = nn.Sequential(
-            [nn.Dense(self.num_hid), nn.gelu, nn.Dense(self.num_hid)]
+            [dense(self.num_hid), nn.gelu, dense(self.num_hid)]
         )
 
         self.time_coder_grad = None
         if self.use_lp:
             self.time_coder_grad = nn.Sequential(
-                [nn.Dense(self.num_hid)]
+                [dense(self.num_hid)]
                 + [
-                    nn.Sequential([nn.gelu, nn.Dense(self.num_hid)])
+                    nn.Sequential([nn.gelu, dense(self.num_hid)])
                     for _ in range(self.num_layers)
                 ]
                 + [nn.gelu]
@@ -149,7 +155,7 @@ class PISGRADNetClf(nn.Module):
         if self.shared_model:
             self.state_net = nn.Sequential(
                 [
-                    nn.Sequential([nn.Dense(self.num_hid), nn.gelu])
+                    nn.Sequential([dense(self.num_hid), nn.gelu])
                     for _ in range(self.num_layers)
                 ]
                 + [
@@ -163,14 +169,14 @@ class PISGRADNetClf(nn.Module):
         else:
             self.backbone = nn.Sequential(
                 [
-                    nn.Sequential([nn.Dense(self.num_hid), nn.gelu])
+                    nn.Sequential([dense(self.num_hid), nn.gelu])
                     for _ in range(self.num_layers - 1)
                 ]
             )
 
             self.fwd_state_net = nn.Sequential(
                 [
-                    nn.Dense(self.num_hid),
+                    dense(self.num_hid),
                     nn.gelu,
                     nn.Dense(
                         self.fwd_pred_dim,
@@ -181,7 +187,7 @@ class PISGRADNetClf(nn.Module):
             )
             self.bwd_state_net = nn.Sequential(
                 [
-                    nn.Dense(self.num_hid),
+                    dense(self.num_hid),
                     nn.gelu,
                     nn.Dense(
                         self.bwd_pred_dim,
@@ -192,7 +198,7 @@ class PISGRADNetClf(nn.Module):
             )
         # self.step_net = nn.Sequential(
         #     [
-        #         nn.Dense(self.num_hid),
+        #         dense(self.num_hid),
         #         nn.gelu,
         #         nn.Dense(
         #             self.num_steps,

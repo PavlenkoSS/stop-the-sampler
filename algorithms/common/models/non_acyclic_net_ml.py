@@ -1,5 +1,9 @@
+from functools import partial
+
 import jax.numpy as jnp
 from flax import linen as nn
+
+from algorithms.common.models.initializers import hidden_kernel_init
 
 
 class NonAcyclicNetML(nn.Module):
@@ -13,6 +17,7 @@ class NonAcyclicNetML(nn.Module):
 
     weight_init: float = 1e-8
     bias_init: float = 0.1
+    hidden_init: str = "lecun_normal"  # lecun_normal | orthogonal
 
     gamma: float = 1.0
     num_levels: int = 1
@@ -23,13 +28,14 @@ class NonAcyclicNetML(nn.Module):
     mean_clip: float = 10.0
 
     def setup(self):
+        dense = partial(nn.Dense, kernel_init=hidden_kernel_init(self.hidden_init))
         self.level_phase = self.param(
             "level_phase", nn.initializers.zeros_init(), (1, self.num_hid)
         )
         self.level_coeff = jnp.linspace(start=0.1, stop=100, num=self.num_hid)[None]
 
         self.level_coder_state = nn.Sequential(
-            [nn.Dense(self.num_hid), nn.gelu, nn.Dense(self.num_hid)]
+            [dense(self.num_hid), nn.gelu, dense(self.num_hid)]
         )
 
         self.fwd_pred_dim = 1 + 2 * self.dim + (self.dim if self.use_lp else 0)
@@ -37,14 +43,14 @@ class NonAcyclicNetML(nn.Module):
 
         self.backbone = nn.Sequential(
             [
-                nn.Sequential([nn.Dense(self.num_hid), nn.gelu])
+                nn.Sequential([dense(self.num_hid), nn.gelu])
                 for _ in range(self.num_layers - 1)
             ]
         )
 
         self.fwd_state_net = nn.Sequential(
             [
-                nn.Dense(self.num_hid),
+                dense(self.num_hid),
                 nn.gelu,
                 nn.Dense(
                     self.fwd_pred_dim,
@@ -55,7 +61,7 @@ class NonAcyclicNetML(nn.Module):
         )
         self.bwd_state_net = nn.Sequential(
             [
-                nn.Dense(self.num_hid),
+                dense(self.num_hid),
                 nn.gelu,
                 nn.Dense(
                     self.bwd_pred_dim,
