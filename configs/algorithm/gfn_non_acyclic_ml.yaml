@@ -26,6 +26,7 @@ lr_schedule:
 
 defaults:
   - model: non_acyclic_net_ml
+  - optimizer: adam
 
 model:
   use_lp: ${target.all.use_lp}

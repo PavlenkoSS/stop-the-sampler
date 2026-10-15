@@ -23,6 +23,7 @@ lr_schedule:
 
 defaults:
   - model: pisgrad_net_clf
+  - optimizer: adam
 
 buffer:
   use: True

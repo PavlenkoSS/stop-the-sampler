@@ -17,6 +17,7 @@ lr_schedule:
 
 defaults:
   - model: pisgrad_net
+  - optimizer: adam
 
 model:
   use_lp: ${target.all.use_lp}

@@ -11,6 +11,7 @@ import jax.numpy as jnp
 
 import wandb
 
+from algorithms.common.adamo import iso_penalty
 from algorithms.common.diffusion_related.init_model import init_model_non_acyclic_ml
 from algorithms.common.eval_methods.non_acyclic_methods import get_eval_fn
 from algorithms.gfn_non_acyclic_ml.buffer import build_terminal_state_buffer
@@ -297,6 +298,7 @@ def gfn_non_acyclic_ml_trainer(cfg, target, exp=None):
                     ("loss_fwd" if is_on_policy_iter else "loss_bwd"): jnp.mean(losses),
                     "logZ_learned": model_state.params["params"]["logZ"].sum(),
                     "params_l2_norm": params_norm,
+                    "iso_penalty": iso_penalty(model_state.params),
                     "grads_l2_norm": grads_norm,
                 },
                 step=it,

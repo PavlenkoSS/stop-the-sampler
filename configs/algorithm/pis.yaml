@@ -16,6 +16,7 @@ lr_schedule:
 
 defaults:
   - model: pisgrad_net
+  - optimizer: adam
   - noise_schedule: const
 
 model:

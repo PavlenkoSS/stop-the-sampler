@@ -4,6 +4,7 @@ import optax
 from flax.training.train_state import TrainState
 from flax.traverse_util import path_aware_map
 
+from algorithms.common.adamo import adamo
 from algorithms.common.models.pisgrad_net import PISGRADNet
 from algorithms.common.models.non_acyclic_net import NonAcyclicNet
 from algorithms.common.models.pisgrad_net_clf import PISGRADNetClf
@@ -25,6 +26,31 @@ def pisgrad_net_label_map(path, _):
         return "network_bwd_optim"
     else:
         return "network_optim"
+
+
+def build_optimizer(alg_cfg, base_lr, build_lr_schedule):
+    """The optimizer one parameter group is trained with, as ``alg_cfg.optimizer``
+    names it: ``adam`` (the default, and the only choice before) or ``adamo``.
+
+    Every group goes through here, so ``adamo`` is AdamO on every group; on one
+    without kernels (``logZ``, ``betas``) its isometry term is zero and it is Adam.
+    """
+    opt_cfg = getattr(alg_cfg, "optimizer", None)
+    name = "adam" if opt_cfg is None else opt_cfg.name
+    match name:
+        case "adam":
+            return optax.adam(learning_rate=build_lr_schedule(base_lr))
+        case "adamo":
+            # iso_lr follows the same schedule as the step size; null means
+            # equal to this group's step size, as in the paper
+            iso_lr = getattr(opt_cfg, "iso_lr", None)
+            return adamo(
+                learning_rate=build_lr_schedule(base_lr),
+                lam=opt_cfg.lam,
+                iso_lr=None if iso_lr is None else build_lr_schedule(iso_lr),
+            )
+        case _:
+            raise ValueError(f"Invalid optimizer: {name}")
 
 
 def init_model(key, dim, alg_cfg) -> TrainState:
@@ -81,30 +107,30 @@ def init_model(key, dim, alg_cfg) -> TrainState:
                 if alg_cfg.grad_clip > 0
                 else optax.identity()
             ),
-            optax.adam(learning_rate=build_lr_schedule(alg_cfg.step_size)),
+            build_optimizer(alg_cfg, alg_cfg.step_size, build_lr_schedule),
         )
     else:  # "gfn" in alg_cfg.name
         optimizers_map = {
-            "network_optim": optax.adam(
-                learning_rate=build_lr_schedule(alg_cfg.step_size)
+            "network_optim": build_optimizer(
+                alg_cfg, alg_cfg.step_size, build_lr_schedule
             )
         }
         if "gfn_subtb" in alg_cfg.name:
-            optimizers_map["logflow_optim"] = optax.adam(
-                learning_rate=build_lr_schedule(alg_cfg.logflow_step_size)
+            optimizers_map["logflow_optim"] = build_optimizer(
+                alg_cfg, alg_cfg.logflow_step_size, build_lr_schedule
             )
             if alg_cfg.beta_schedule == "learnt":
                 params["params"]["betas"] = jnp.ones((alg_cfg.num_steps,))
-                optimizers_map["betas_optim"] = optax.adam(
-                    learning_rate=build_lr_schedule(alg_cfg.beta_step_size)
+                optimizers_map["betas_optim"] = build_optimizer(
+                    alg_cfg, alg_cfg.beta_step_size, build_lr_schedule
                 )
 
         if not (
             "gfn_tb" in alg_cfg.name and alg_cfg.loss_type == "lv"
         ):  # for lv, logZ is not used
             params["params"]["logZ"] = jnp.array((alg_cfg.init_logZ,))
-            optimizers_map["logZ_optim"] = optax.adam(
-                learning_rate=build_lr_schedule(alg_cfg.logZ_step_size)
+            optimizers_map["logZ_optim"] = build_optimizer(
+                alg_cfg, alg_cfg.logZ_step_size, build_lr_schedule
             )
 
         param_labels = path_aware_map(pisgrad_net_label_map, params)
@@ -182,19 +208,17 @@ def init_model_non_acyclic(key, dim, alg_cfg) -> TrainState:
         params["params"] = {**params["params"], **params_bwd["params"]}
         
     optimizers_map = {
-        "network_optim": optax.adam(
-            learning_rate=build_lr_schedule(alg_cfg.step_size)
-        )
+        "network_optim": build_optimizer(alg_cfg, alg_cfg.step_size, build_lr_schedule)
     }
 
     if not model.shared_model:
-        optimizers_map["network_bwd_optim"] = optax.adam(
-            learning_rate=build_lr_schedule(alg_cfg.bwd_step_size)
+        optimizers_map["network_bwd_optim"] = build_optimizer(
+            alg_cfg, alg_cfg.bwd_step_size, build_lr_schedule
         )
 
     params["params"]["logZ"] = jnp.array((alg_cfg.init_logZ,))
-    optimizers_map["logZ_optim"] = optax.adam(
-        learning_rate=build_lr_schedule(alg_cfg.logZ_step_size)
+    optimizers_map["logZ_optim"] = build_optimizer(
+        alg_cfg, alg_cfg.logZ_step_size, build_lr_schedule
     )
 
     param_labels = path_aware_map(pisgrad_net_label_map, params)
@@ -281,19 +305,17 @@ def init_model_pisgrad_net_clf(key, dim, alg_cfg) -> TrainState:
         params["params"] = {**params["params"], **params_bwd["params"]}
         
     optimizers_map = {
-        "network_optim": optax.adam(
-            learning_rate=build_lr_schedule(alg_cfg.step_size)
-        )
+        "network_optim": build_optimizer(alg_cfg, alg_cfg.step_size, build_lr_schedule)
     }
 
     if not model.shared_model:
-        optimizers_map["network_bwd_optim"] = optax.adam(
-            learning_rate=build_lr_schedule(alg_cfg.bwd_step_size)
+        optimizers_map["network_bwd_optim"] = build_optimizer(
+            alg_cfg, alg_cfg.bwd_step_size, build_lr_schedule
         )
 
     params["params"]["logZ"] = jnp.array((alg_cfg.init_logZ,))
-    optimizers_map["logZ_optim"] = optax.adam(
-        learning_rate=build_lr_schedule(alg_cfg.logZ_step_size)
+    optimizers_map["logZ_optim"] = build_optimizer(
+        alg_cfg, alg_cfg.logZ_step_size, build_lr_schedule
     )
 
     param_labels = path_aware_map(pisgrad_net_label_map, params)
@@ -379,17 +401,15 @@ def init_model_non_acyclic_ml(key, dim, alg_cfg) -> TrainState:
     params["params"] = {**params["params"], **params_bwd["params"]}
         
     optimizers_map = {
-        "network_optim": optax.adam(
-            learning_rate=build_lr_schedule(alg_cfg.step_size)
-        )
+        "network_optim": build_optimizer(alg_cfg, alg_cfg.step_size, build_lr_schedule)
     }
 
-    optimizers_map["network_bwd_optim"] = optax.adam(
-        learning_rate=build_lr_schedule(alg_cfg.bwd_step_size)
+    optimizers_map["network_bwd_optim"] = build_optimizer(
+        alg_cfg, alg_cfg.bwd_step_size, build_lr_schedule
     )
     params["params"]["logZ"] = jnp.full((alg_cfg.num_levels,), alg_cfg.init_logZ)
-    optimizers_map["logZ_optim"] = optax.adam(
-        learning_rate=build_lr_schedule(alg_cfg.logZ_step_size)
+    optimizers_map["logZ_optim"] = build_optimizer(
+        alg_cfg, alg_cfg.logZ_step_size, build_lr_schedule
     )
 
     param_labels = path_aware_map(pisgrad_net_label_map, params)

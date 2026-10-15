@@ -46,3 +46,13 @@ python run.py algorithm=<algorithm_name> target=<target_name>
 - `funnel`
 - `many_well`
 - `nice_digits`
+
+### Optimizer
+
+Every parameter group is trained with Adam by default. AdamO -- Adam plus a decoupled isometry regularizer ([Rosseau, Müller & Nowé](https://arxiv.org/abs/2606.09762), ported from `plasticity-umap-reset`) -- is selected with the `optimizer` config group:
+```bash
+python run.py algorithm=gfn_non_acyclic target=funnel algorithm/optimizer=adamo algorithm.optimizer.lam=1e-3
+```
+It adds `-iso_lr * lam * grad R_iso(W)` outside Adam's adaptive scaling, where `R_iso(W) = sum_i (sigma_i(W)^2 - 1)^2` over every `kernel` of the networks; biases, `logZ` and the time phases get plain Adam. `iso_lr: null` means each group's own step size, with its schedule. The summed `R_iso` is logged to Comet as `iso_penalty` for every optimizer.
+
+Tests: `python -m pytest tests`

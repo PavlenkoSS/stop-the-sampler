@@ -52,6 +52,7 @@ lr_schedule:
 
 defaults:
   - model: non_acyclic_net
+  - optimizer: adam
 
 model:
   num_hid: ${target.all.num_hid}
